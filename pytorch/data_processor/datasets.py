@@ -26,7 +26,7 @@ class SubgraphDataset(Dataset):
     """Extracted, labeled, subgraph dataset -- DGL Only"""
 
     def __init__(self, db_path, db_name, raw_data_paths= None, add_traspose_rels=None,  use_pre_embeddings=False, dataset='', kge_model='',ssp_graph = None, id2entity= None, id2relation= None, rel= None,  global_graph = None, dig_layer=4,BKG_file_name=''):
-        self.main_env = lmdb.open(db_path, readonly=True, max_dbs=3, lock=False)
+        self.main_env = lmdb.open(db_path, readonly=True, max_dbs=6, lock=False)
         self.db = self.main_env.open_db(db_name.encode())
         self.db_path = db_path
         self.db_name = db_name
