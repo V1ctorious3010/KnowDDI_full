@@ -104,7 +104,7 @@ if __name__ == '__main__':
 
     # global
     parser.add_argument('--seed', type=int, default=1111, help="seeds for random initial")
-    parser.add_argument("--gpu", type=int, default=3, help="Which GPU to use?")
+    parser.add_argument("--gpu", type=int, default=0, help="Which GPU to use?")
     parser.add_argument('--disable_cuda', action='store_true', help='Disable CUDA')
     parser.add_argument('--load_model', action='store_true', help='Load existing model?')
     parser.add_argument("--experiment_name", "-e", type=str, default="default", help="A folder with this name would be created to dump saved models and log files")
