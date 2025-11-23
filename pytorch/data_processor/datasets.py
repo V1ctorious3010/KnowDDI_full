@@ -70,8 +70,8 @@ class SubgraphDataset(Dataset):
                  raise ValueError(f"Không tìm thấy key 'num_graphs' trong {self.db_name}")
             self.num_graphs = int.from_bytes(num_graphs_bytes, byteorder='little')
 
-
-    with self.main_env.begin(db=self.db) as txn:
+    def __getitem__(self, index):
+        with self.main_env.begin(db=self.db) as txn:
             str_id = '{:08}'.format(index).encode('ascii')
             byte_data = txn.get(str_id)
             
