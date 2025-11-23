@@ -65,13 +65,20 @@ class SubgraphDataset(Dataset):
         self.num_entity = len(id2entity)
         self.dig_layer = dig_layer
         with self.main_env.begin(db=self.db) as txn:
-            self.num_graphs = int.from_bytes(txn.get('num_graphs'.encode()), byteorder='little')
+            num_graphs_bytes = txn.get('num_graphs'.encode())
+            if num_graphs_bytes is None:
+                 raise ValueError(f"Không tìm thấy key 'num_graphs' trong {self.db_name}")
+            self.num_graphs = int.from_bytes(num_graphs_bytes, byteorder='little')
 
 
-    def __getitem__(self, index):
-        with self.main_env.begin(db=self.db) as txn:
+    with self.main_env.begin(db=self.db) as txn:
             str_id = '{:08}'.format(index).encode('ascii')
-            nodes, r_label, g_label, n_labels = deserialize(txn.get(str_id)).values()
+            byte_data = txn.get(str_id)
+            
+            if byte_data is None:
+                raise IndexError(f"Key {str_id} không tồn tại trong {self.db_name}")
+                
+            nodes, r_label, g_label, n_labels = deserialize(byte_data).values()
             directed_subgraph = self._prepare_subgraphs(nodes, n_labels)
             return directed_subgraph, r_label, g_label
            
