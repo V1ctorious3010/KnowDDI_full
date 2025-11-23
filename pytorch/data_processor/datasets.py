@@ -10,33 +10,38 @@ from utils.graph_utils import deserialize, get_neighbors, ssp_multigraph_to_dgl
 import scipy.sparse as ssp
 
 def get_kge_embeddings(dataset, kge_model):
-    """
-    Use pre embeddings from pretrained models
-    """
     path = './experiments/kge_baselines/{}_{}'.format(kge_model, dataset)
     node_features = np.load(os.path.join(path, 'entity_embedding.npy'))
     with open(os.path.join(path, 'id2entity.json')) as json_file:
         kge_id2entity = json.load(json_file)
         kge_entity2id = {v: int(k) for k, v in kge_id2entity.items()}
-
     return node_features, kge_entity2id
-
 
 class SubgraphDataset(Dataset):
     """Extracted, labeled, subgraph dataset -- DGL Only"""
 
     def __init__(self, db_path, db_name, raw_data_paths=None, add_traspose_rels=None, use_pre_embeddings=False, dataset='', kge_model='', ssp_graph=None, id2entity=None, id2relation=None, rel=None, global_graph=None, dig_layer=4, BKG_file_name=''):
         
-        self.main_env = lmdb.open(db_path, readonly=True, max_dbs=10, lock=False, readahead=False, meminit=False)
-        
-        try:
-            self.db = self.main_env.open_db(db_name.encode())
-        except Exception as e:
-            print(f"Error opening DB {db_name}: {e}")
-            raise e
-            
         self.db_path = db_path
         self.db_name = db_name
+        
+        # --- FIX SEGMENTATION FAULT ---
+        # 1. Chỉ mở tạm thời để đọc metadata (num_graphs), sau đó ĐÓNG NGAY.
+        # Không lưu env vào self trong __init__
+        temp_env = lmdb.open(db_path, readonly=True, max_dbs=10, lock=False, readahead=False, meminit=False)
+        temp_db = temp_env.open_db(db_name.encode())
+        with temp_env.begin() as txn:
+            num_graphs_bytes = txn.get('num_graphs'.encode(), db=temp_db)
+            if num_graphs_bytes is None:
+                 raise ValueError(f"Key 'num_graphs' not found in DB {db_name}")
+            self.num_graphs = int.from_bytes(num_graphs_bytes, byteorder='little')
+        temp_env.close() # Đóng ngay lập tức!
+        
+        # Đặt 2 biến này là None, sẽ khởi tạo trong __getitem__
+        self.main_env = None
+        self.db = None
+        # -----------------------------
+
         self.node_features, self.kge_entity2id = get_kge_embeddings(dataset, kge_model) if use_pre_embeddings else (None, None)
         BKG_file = '../data/{}/{}.txt'.format(dataset, BKG_file_name)
 
@@ -47,14 +52,10 @@ class SubgraphDataset(Dataset):
                 ssp_graph, triplets, entity2id, relation2id, id2entity, id2relation, rel, triplets_mr, polarity_mr = process_files_decagon(raw_data_paths, BKG_file)
 
             self.num_rels = rel
-            # print('number of relations:%d'%(self.num_rels))
-
             if add_traspose_rels:
                 ssp_graph_t = [adj.T for adj in ssp_graph]
                 ssp_graph += ssp_graph_t
-
             ssp_graph.append(ssp.identity(len(id2entity)))
-
             self.aug_num_rels = len(ssp_graph)
             self.global_graph = ssp_multigraph_to_dgl(ssp_graph)
             self.ssp_graph = ssp_graph
@@ -68,15 +69,16 @@ class SubgraphDataset(Dataset):
         self.id2relation = id2relation
         self.num_entity = len(id2entity)
         self.dig_layer = dig_layer
-        
-        with self.main_env.begin() as txn:
-            num_graphs_bytes = txn.get('num_graphs'.encode(), db=self.db)
-            if num_graphs_bytes is None:
-                 raise ValueError(f"Key 'num_graphs' not found in DB {self.db_name}")
-            self.num_graphs = int.from_bytes(num_graphs_bytes, byteorder='little')
 
 
     def __getitem__(self, index):
+        # --- FIX SEGMENTATION FAULT ---
+        # 2. Lazy Loading: Chỉ mở kết nối khi worker thực sự cần đọc dữ liệu
+        if self.main_env is None:
+            self.main_env = lmdb.open(self.db_path, readonly=True, max_dbs=10, lock=False, readahead=False, meminit=False)
+            self.db = self.main_env.open_db(self.db_name.encode())
+        # ------------------------------
+
         with self.main_env.begin() as txn:
             str_id = '{:08}'.format(index).encode('ascii')
             byte_data = txn.get(str_id, db=self.db)
@@ -103,43 +105,32 @@ class SubgraphDataset(Dataset):
         return directed_subgraph
     
     def extract_r_digraph(self, graph):
-        """
-        Extract subgraphs using the algorithm proposed in the paper
-        """
         head_nodes = (graph.ndata['id'] == 1).nonzero().squeeze(1)
         tail_nodes = (graph.ndata['id'] == 2).nonzero().squeeze(1)
-
         total_nodes = torch.cat([head_nodes, tail_nodes])
         raw_layer_edges = {}
         for i in range(self.dig_layer):
             head_nodes, head_edges = get_neighbors(graph, head_nodes)
             raw_layer_edges[i] = head_edges
-            
         layer_edges_id = torch.LongTensor([])
-
         for i in reversed(range(self.dig_layer)):
             select = torch.nonzero(torch.eq(raw_layer_edges[i][:, 1], tail_nodes.unsqueeze(1)))
             l_edge = raw_layer_edges[i][select[:, 1]]
-
             layer_edges_id = torch.cat([layer_edges_id, l_edge[:, 2]]) 
             tail_nodes = torch.unique(l_edge[:, 0])
-
         total_edges = torch.unique(layer_edges_id, dim=0, sorted=True)
         if total_edges.numel():
             r_digraph = dgl.edge_subgraph(graph, total_edges)
         else:
             r_digraph = dgl.node_subgraph(graph, total_nodes)
-
         return r_digraph
 
     def _prepare_features(self, subgraph, n_labels):
         n_nodes = subgraph.number_of_nodes()
         head_id = np.where((n_labels[:, 0] == 0) & (n_labels[:, 1] == 1))[0]
         tail_id = np.where((n_labels[:, 0] == 1) & (n_labels[:, 1] == 0))[0]
-        
         n_ids = np.zeros(n_nodes)
-        n_ids[head_id] = 1
-        n_ids[tail_id] = 2
+        n_ids[head_id] = 1 
+        n_ids[tail_id] = 2 
         subgraph.ndata['id'] = torch.FloatTensor(n_ids)
-
         return subgraph
